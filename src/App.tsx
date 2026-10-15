@@ -3,13 +3,19 @@ import {
   getCurrentUser, 
   setCurrentUser, 
   getCourses, 
+  saveCourses,
   getCart, 
   addToCart as storageAddToCart, 
   removeFromCart as storageRemoveFromCart, 
   getTestimonials, 
+  saveTestimonials,
   getPosts, 
+  savePosts,
+  saveOrders,
+  saveUsers,
   initializeStorage 
 } from './services/storage';
+import { getSheetConfig, pullFromGoogleSheets } from './services/googleSheets';
 import { User, Course, CartItem, Testimonial, AdminPost } from './types';
 
 import { Navbar } from './components/Navbar';
@@ -27,9 +33,34 @@ import { AdminDashboard } from './components/AdminDashboard';
 import { Classroom } from './components/Classroom';
 
 export default function App() {
-  // Initialize storage
+  // Initialize storage & auto-sync from Google Sheets on app load if connected
   useEffect(() => {
     initializeStorage();
+
+    // Background auto-pull from Google Sheets if configured (so all devices see latest data)
+    const sheetCfg = getSheetConfig();
+    if (sheetCfg.scriptUrl) {
+      pullFromGoogleSheets()
+        .then((pulled) => {
+          if (pulled.courses && pulled.courses.length > 0) {
+            saveCourses(pulled.courses);
+            setCourses(pulled.courses);
+          }
+          if (pulled.testimonials && pulled.testimonials.length > 0) {
+            saveTestimonials(pulled.testimonials);
+            setTestimonials(pulled.testimonials);
+          }
+          if (pulled.orders && pulled.orders.length > 0) {
+            saveOrders(pulled.orders);
+          }
+          if (pulled.users && pulled.users.length > 0) {
+            saveUsers(pulled.users);
+          }
+        })
+        .catch((err) => {
+          console.warn('Auto pull on boot notice:', err);
+        });
+    }
   }, []);
 
   // Main state

@@ -14,12 +14,22 @@ export interface SheetConfig {
   syncEnabled: boolean;
 }
 
+export const DEFAULT_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyXf-75aHUSyuxqBBFlj-QTITFvaz1J4BnSikH_5NcIIo7fFQc3tXxXF6guTqrFjQSl/exec';
+
 export function getSheetConfig(): SheetConfig {
+  const envScriptUrl = (import.meta as any).env?.VITE_GOOGLE_APPS_SCRIPT_URL || null;
+  const envSheetUrl = (import.meta as any).env?.VITE_GOOGLE_SHEET_URL || null;
+
+  const scriptUrl = localStorage.getItem(STORAGE_KEYS.SCRIPT_URL) || envScriptUrl || DEFAULT_APPS_SCRIPT_URL;
+  const spreadsheetUrl = localStorage.getItem(STORAGE_KEYS.SHEET_URL) || envSheetUrl;
+  const lastSyncTime = localStorage.getItem(STORAGE_KEYS.LAST_SYNC);
+  const syncEnabled = localStorage.getItem(STORAGE_KEYS.SYNC_ENABLED) === 'false' ? false : (!!scriptUrl);
+
   return {
-    scriptUrl: localStorage.getItem(STORAGE_KEYS.SCRIPT_URL),
-    spreadsheetUrl: localStorage.getItem(STORAGE_KEYS.SHEET_URL),
-    lastSyncTime: localStorage.getItem(STORAGE_KEYS.LAST_SYNC),
-    syncEnabled: localStorage.getItem(STORAGE_KEYS.SYNC_ENABLED) === 'true',
+    scriptUrl,
+    spreadsheetUrl,
+    lastSyncTime,
+    syncEnabled,
   };
 }
 
@@ -42,6 +52,46 @@ export function saveSheetConfig(config: Partial<SheetConfig>) {
   }
   if (config.syncEnabled !== undefined) {
     localStorage.setItem(STORAGE_KEYS.SYNC_ENABLED, config.syncEnabled ? 'true' : 'false');
+  }
+}
+
+// Test connectivity to Google Apps Script Web App
+export async function testGoogleSheetsConnection(customScriptUrl?: string): Promise<{ success: boolean; message: string }> {
+  const urlToTest = (customScriptUrl || getSheetConfig().scriptUrl || '').trim();
+  if (!urlToTest) {
+    return {
+      success: false,
+      message: 'URL Google Apps Script belum dimasukkan. Silakan masukkan URL Web App yang berakhiran /exec.',
+    };
+  }
+
+  try {
+    const testUrl = `${urlToTest}${urlToTest.includes('?') ? '&' : '?'}action=PING&t=${Date.now()}`;
+    const res = await fetch(testUrl, { method: 'GET' });
+    if (!res.ok) {
+      return {
+        success: false,
+        message: `Google Apps Script mengembalikan HTTP status ${res.status}. Pastikan URL berakhiran /exec dan deployment disetel ke Siapa Saja (Anyone).`,
+      };
+    }
+    const json = await res.json();
+    if (json.success) {
+      saveSheetConfig({ lastSyncTime: new Date().toISOString() });
+      return {
+        success: true,
+        message: 'Koneksi Berhasil! Google Apps Script aktif dan terhubung ke Google Spreadsheet.',
+      };
+    } else {
+      return {
+        success: false,
+        message: json.message || 'Respons dari Google Apps Script tidak sesuai.',
+      };
+    }
+  } catch (err: any) {
+    return {
+      success: false,
+      message: `Gagal tersambung: ${err.message || 'CORS/Network error'}. Pastikan saat Deploy di Apps Script, opsi "Who has access" dipilih "Anyone" (Siapa saja).`,
+    };
   }
 }
 
@@ -217,6 +267,29 @@ export async function pushAllToGoogleSheets(state: {
     throw new Error('Gagal mengirim data ke Google Apps Script.');
   }
   return true;
+}
+
+// ---------------- AUTO-SYNC IN BACKGROUND ----------------
+export async function autoSyncToGoogleSheets(customState?: {
+  users?: User[];
+  courses?: Course[];
+  orders?: Order[];
+  testimonials?: Testimonial[];
+}): Promise<boolean> {
+  const { scriptUrl } = getSheetConfig();
+  if (!scriptUrl) return false;
+
+  try {
+    const users = customState?.users || JSON.parse(localStorage.getItem('kalaamunaa_users') || '[]');
+    const courses = customState?.courses || JSON.parse(localStorage.getItem('kalaamunaa_courses') || '[]');
+    const orders = customState?.orders || JSON.parse(localStorage.getItem('kalaamunaa_orders') || '[]');
+    const testimonials = customState?.testimonials || JSON.parse(localStorage.getItem('kalaamunaa_testimonials') || '[]');
+
+    return await pushAllToGoogleSheets({ users, courses, orders, testimonials });
+  } catch (err) {
+    console.warn('Auto sync ke Google Sheets gagal:', err);
+    return false;
+  }
 }
 
 // ---------------- PULL ALL DATA FROM SPREADSHEET ----------------

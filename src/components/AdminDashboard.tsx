@@ -20,7 +20,11 @@ import {
   FileText,
   Star,
   FileSpreadsheet,
-  RefreshCw
+  RefreshCw,
+  Database,
+  Download,
+  Upload,
+  AlertTriangle
 } from 'lucide-react';
 import { 
   Order, 
@@ -40,10 +44,12 @@ import {
   getTestimonials, 
   saveTestimonials, 
   getUsers, 
-  formatRupiah 
+  formatRupiah,
+  exportFullDatabase,
+  importFullDatabase
 } from '../services/storage';
 import { GoogleSheetsSyncModal } from './GoogleSheetsSyncModal';
-import { getSheetConfig, appendCourseToSheet } from '../services/googleSheets';
+import { getSheetConfig, appendCourseToSheet, autoSyncToGoogleSheets } from '../services/googleSheets';
 
 interface AdminDashboardProps {
   onCourseUpdated: () => void;
@@ -78,12 +84,61 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onCourseUpdated 
 
   // Google Sheets Modal
   const [isSheetModalOpen, setIsSheetModalOpen] = useState(false);
+  const [saveToast, setSaveToast] = useState<{ message: string; isCloud: boolean } | null>(null);
+
+  const notifySaved = (itemLabel: string) => {
+    const isCloud = !!getSheetConfig().scriptUrl;
+    setSaveToast({
+      message: isCloud
+        ? `✓ ${itemLabel} berhasil disimpan ke database & Google Spreadsheet!`
+        : `✓ ${itemLabel} berhasil disimpan di browser! Hubungkan URL Google Apps Script di tab Database agar tersimpan ke Google Drive Anda.`,
+      isCloud,
+    });
+    setTimeout(() => {
+      setSaveToast(null);
+    }, 4500);
+  };
 
   const handleSyncRefresh = () => {
     setOrders(getOrders());
     setCourses(getCourses());
     setTestimonials(getTestimonials());
+    setPosts(getPosts());
     onCourseUpdated();
+  };
+
+  const handleQuickDownloadBackup = () => {
+    const data = exportFullDatabase();
+    const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(data, null, 2));
+    const a = document.createElement('a');
+    a.href = dataStr;
+    a.download = `kalaamunaa-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    notifySaved('File cadangan database JSON berhasil diunduh');
+  };
+
+  const handleQuickRestoreBackup = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const json = JSON.parse(event.target?.result as string);
+        const ok = importFullDatabase(json);
+        if (ok) {
+          handleSyncRefresh();
+          notifySaved('Database berhasil dipulihkan dari file JSON');
+        } else {
+          alert('Format file JSON tidak sesuai.');
+        }
+      } catch (err) {
+        alert('Gagal membaca file JSON cadangan.');
+      }
+    };
+    reader.readAsText(file);
   };
 
   // ---------------- ORDER APPROVAL LOGIC ----------------
@@ -100,6 +155,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onCourseUpdated 
     });
     setOrders(updated);
     saveOrders(updated);
+    autoSyncToGoogleSheets({ orders: updated });
+    notifySaved('Pesanan siswa disetujui');
     onCourseUpdated();
   };
 
@@ -113,6 +170,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onCourseUpdated 
     });
     setOrders(updated);
     saveOrders(updated);
+    autoSyncToGoogleSheets({ orders: updated });
+    notifySaved('Pesanan dibatalkan');
   };
 
   // ---------------- COURSE CRUD ----------------
@@ -189,11 +248,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onCourseUpdated 
         ],
       };
       updatedCourses = [newCourse, ...courses];
-      appendCourseToSheet(newCourse);
     }
 
     setCourses(updatedCourses);
     saveCourses(updatedCourses);
+    autoSyncToGoogleSheets({ courses: updatedCourses });
+    notifySaved(editingCourse ? 'Perubahan kursus' : 'Kursus baru');
     onCourseUpdated();
     setIsCourseModalOpen(false);
     setEditingCourse(null);
@@ -204,6 +264,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onCourseUpdated 
     const updated = courses.filter((c) => c.id !== courseId);
     setCourses(updated);
     saveCourses(updated);
+    autoSyncToGoogleSheets({ courses: updated });
+    notifySaved('Kursus dihapus');
     onCourseUpdated();
   };
 
@@ -259,6 +321,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onCourseUpdated 
     setCourses(updatedCourses);
     saveCourses(updatedCourses);
     setSelectedCourseForLessons(updatedCourse);
+    autoSyncToGoogleSheets({ courses: updatedCourses });
+    notifySaved(editingLesson ? 'Pelajaran diperbarui' : 'Pelajaran baru ditambahkan');
     onCourseUpdated();
     setIsLessonModalOpen(false);
     setEditingLesson(null);
@@ -277,6 +341,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onCourseUpdated 
     setCourses(updatedCourses);
     saveCourses(updatedCourses);
     setSelectedCourseForLessons(updatedCourse);
+    autoSyncToGoogleSheets({ courses: updatedCourses });
+    notifySaved('Pelajaran dihapus');
     onCourseUpdated();
   };
 
@@ -292,6 +358,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onCourseUpdated 
     if (selectedCourseForLessons && selectedCourseForLessons.id === courseId) {
       setSelectedCourseForLessons({ ...selectedCourseForLessons, certificateFormUrl: newUrl });
     }
+    autoSyncToGoogleSheets({ courses: updatedCourses });
+    notifySaved('Link form sertifikat diperbarui');
     onCourseUpdated();
   };
 
@@ -330,6 +398,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onCourseUpdated 
     }
     setPosts(updatedPosts);
     savePosts(updatedPosts);
+    autoSyncToGoogleSheets();
+    notifySaved(editingPost ? 'Postingan diperbarui' : 'Postingan baru');
     setIsPostModalOpen(false);
     setEditingPost(null);
   };
@@ -339,6 +409,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onCourseUpdated 
     const updated = posts.filter((p) => p.id !== postId);
     setPosts(updated);
     savePosts(updated);
+    autoSyncToGoogleSheets();
+    notifySaved('Postingan dihapus');
   };
 
   // ---------------- TESTIMONIAL CRUD ----------------
@@ -375,6 +447,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onCourseUpdated 
     }
     setTestimonials(updatedTestis);
     saveTestimonials(updatedTestis);
+    autoSyncToGoogleSheets({ testimonials: updatedTestis });
+    notifySaved(editingTestimonial ? 'Testimoni diperbarui' : 'Testimoni baru');
     setIsTestimonialModalOpen(false);
     setEditingTestimonial(null);
   };
@@ -384,6 +458,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onCourseUpdated 
     const updated = testimonials.filter((t) => t.id !== testiId);
     setTestimonials(updated);
     saveTestimonials(updated);
+    autoSyncToGoogleSheets({ testimonials: updated });
+    notifySaved('Testimoni dihapus');
   };
 
   // Computed summary metrics
@@ -419,52 +495,102 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onCourseUpdated 
         {/* Google Sheets Integration Card */}
         {(() => {
           const sheetConfig = getSheetConfig();
+          const isConnected = !!sheetConfig.scriptUrl;
+
           return (
-            <div className="bg-gradient-to-r from-emerald-900/90 via-emerald-800/80 to-slate-900 border border-emerald-500/30 rounded-3xl p-5 sm:p-6 text-white shadow-lg flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-              <div className="flex items-center space-x-4">
-                <div className="w-12 h-12 rounded-2xl bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 flex items-center justify-center shrink-0">
-                  <FileSpreadsheet className="w-6 h-6" />
-                </div>
-                <div>
-                  <div className="flex items-center space-x-2">
-                    <span className="text-xs font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/30 text-emerald-300 border border-emerald-400/30">
-                      {sheetConfig.scriptUrl ? '🟢 Google Spreadsheet Terhubung' : '⚪ Google Spreadsheet Belum Terhubung'}
-                    </span>
-                    {sheetConfig.lastSyncTime && (
-                      <span className="text-[11px] text-slate-400 hidden sm:inline">
-                        Terakhir sinkron: {new Date(sheetConfig.lastSyncTime).toLocaleTimeString('id-ID')}
-                      </span>
-                    )}
+            <div className={`border rounded-3xl p-5 sm:p-6 text-white shadow-lg space-y-4 ${
+              isConnected
+                ? 'bg-gradient-to-r from-emerald-900/90 via-emerald-800/80 to-slate-900 border-emerald-500/30'
+                : 'bg-gradient-to-r from-amber-950/90 via-slate-900 to-slate-900 border-amber-500/30'
+            }`}>
+              <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
+                <div className="flex items-start space-x-4">
+                  <div className={`w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 border ${
+                    isConnected
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400/30'
+                      : 'bg-amber-500/20 text-amber-300 border-amber-400/30'
+                  }`}>
+                    {isConnected ? <FileSpreadsheet className="w-6 h-6" /> : <Database className="w-6 h-6" />}
                   </div>
-                  <h3 className="font-extrabold text-base text-white mt-1">
-                    Penyimpanan Data Google Spreadsheet
-                  </h3>
-                  <p className="text-xs text-emerald-100/80">
-                    Setiap pendaftaran peserta, login, pesanan checkout, dan penambahan kursus baru tersimpan langsung ke Google Spreadsheet.
-                  </p>
+
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className={`text-xs font-bold px-2.5 py-0.5 rounded-full border ${
+                        isConnected
+                          ? 'bg-emerald-500/30 text-emerald-300 border-emerald-400/30'
+                          : 'bg-amber-500/30 text-amber-300 border-amber-400/30'
+                      }`}>
+                        {isConnected ? '🟢 Database Cloud Google Spreadsheet Aktif' : '⚠️ Penyimpanan Lokal (Belum Terhubung ke Google Spreadsheet)'}
+                      </span>
+                      {sheetConfig.lastSyncTime && (
+                        <span className="text-[11px] text-slate-400 hidden sm:inline">
+                          Terakhir sinkron: {new Date(sheetConfig.lastSyncTime).toLocaleTimeString('id-ID')}
+                        </span>
+                      )}
+                    </div>
+
+                    <h3 className="font-extrabold text-base text-white">
+                      {isConnected
+                        ? 'Semua Kustomisasi Tersimpan Otomatis ke Google Drive'
+                        : 'Kustomisasi Anda Tersimpan di Browser Lokal (Laptop Ini)'}
+                    </h3>
+
+                    <p className="text-xs text-slate-300 max-w-2xl leading-relaxed">
+                      {isConnected
+                        ? 'Setiap penambahan materi, harga, kuis YouTube, dan pendaftaran peserta otomatis tersimpan ke Google Spreadsheet Anda dan langsung terlihat oleh siswa di HP maupun Vercel.'
+                        : 'Perubahan materi, YouTube, & kuis tersimpan di browser ini. Agar perubahan otomatis muncul di HP siswa atau saat dideploy ke Vercel, hubungkan URL Google Apps Script Anda (hanya butuh 1 menit).'}
+                    </p>
+                  </div>
                 </div>
-              </div>
 
-              <div className="flex items-center space-x-2.5 w-full sm:w-auto">
-                {sheetConfig.spreadsheetUrl && (
-                  <a
-                    href={sheetConfig.spreadsheetUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-white font-bold text-xs flex items-center space-x-1.5 transition-colors"
+                <div className="flex flex-wrap items-center gap-2.5 w-full lg:w-auto">
+                  {sheetConfig.spreadsheetUrl && (
+                    <a
+                      href={sheetConfig.spreadsheetUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-white font-bold text-xs flex items-center space-x-1.5 transition-colors"
+                    >
+                      <span>Buka Sheet</span>
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </a>
+                  )}
+
+                  <button
+                    onClick={() => setIsSheetModalOpen(true)}
+                    className={`px-5 py-2.5 rounded-xl font-black text-xs transition-all shadow-md flex items-center space-x-1.5 cursor-pointer ${
+                      isConnected
+                        ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
+                        : 'bg-amber-400 hover:bg-amber-300 text-slate-950 animate-pulse'
+                    }`}
                   >
-                    <span>Buka Sheet</span>
-                    <ExternalLink className="w-3.5 h-3.5" />
-                  </a>
-                )}
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>{isConnected ? 'Sinkronisasi Spreadsheet' : 'Hubungkan Spreadsheet Sekarang'}</span>
+                  </button>
 
-                <button
-                  onClick={() => setIsSheetModalOpen(true)}
-                  className="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs transition-all shadow-md flex items-center space-x-1.5 cursor-pointer"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  <span>Sinkronisasi Spreadsheet</span>
-                </button>
+                  <button
+                    onClick={handleQuickDownloadBackup}
+                    title="Download Cadangan Data JSON"
+                    className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-white font-bold text-xs flex items-center space-x-1.5 transition-colors cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">Backup JSON</span>
+                  </button>
+
+                  <label
+                    title="Pulihkan dari Cadangan Data JSON"
+                    className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-600 text-white font-bold text-xs flex items-center space-x-1.5 transition-colors cursor-pointer"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">Restore</span>
+                    <input
+                      type="file"
+                      accept=".json"
+                      onChange={handleQuickRestoreBackup}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
               </div>
             </div>
           );
@@ -1686,6 +1812,34 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onCourseUpdated 
         onClose={() => setIsSheetModalOpen(false)}
         onDataRefreshed={handleSyncRefresh}
       />
+
+      {/* Floating Save Notification Toast */}
+      {saveToast && (
+        <div className="fixed bottom-6 right-6 z-50 max-w-md bg-slate-900 text-white p-4 rounded-2xl shadow-2xl border border-slate-700 animate-in fade-in slide-in-from-bottom-4 flex items-start space-x-3">
+          <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
+            saveToast.isCloud ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'
+          }`}>
+            {saveToast.isCloud ? <CheckCircle2 className="w-5 h-5" /> : <AlertTriangle className="w-5 h-5" />}
+          </div>
+          <div className="flex-1 text-xs">
+            <p className="font-bold text-white">{saveToast.message}</p>
+            {!saveToast.isCloud && (
+              <button
+                onClick={() => setIsSheetModalOpen(true)}
+                className="mt-2 text-[11px] font-bold text-amber-300 hover:text-amber-200 underline block cursor-pointer"
+              >
+                Hubungkan Google Spreadsheet agar tersimpan ke cloud →
+              </button>
+            )}
+          </div>
+          <button
+            onClick={() => setSaveToast(null)}
+            className="text-slate-400 hover:text-white cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
     </div>
   );

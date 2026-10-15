@@ -84,6 +84,10 @@ export function initializeStorage() {
     };
     localStorage.setItem(STORAGE_KEYS.PROGRESS, JSON.stringify(sampleProgress));
   }
+  if (!localStorage.getItem('kalaamunaa_apps_script_url')) {
+    localStorage.setItem('kalaamunaa_apps_script_url', 'https://script.google.com/macros/s/AKfycbyXf-75aHUSyuxqBBFlj-QTITFvaz1J4BnSikH_5NcIIo7fFQc3tXxXF6guTqrFjQSl/exec');
+    localStorage.setItem('kalaamunaa_sheet_sync_enabled', 'true');
+  }
 }
 
 // ---------------- COURSES ----------------
@@ -416,3 +420,52 @@ export function generateWhatsAppOrderUrl(studentName: string, items: { title: st
   const encodedMessage = encodeURIComponent(message);
   return `https://wa.me/${phoneNumber}?text=${encodedMessage}`;
 }
+
+// ---------------- BACKUP & RESTORE DATABASE JSON ----------------
+export interface AppDatabaseBackup {
+  version: string;
+  exportedAt: string;
+  courses: Course[];
+  posts: AdminPost[];
+  testimonials: Testimonial[];
+  orders: Order[];
+  users: User[];
+}
+
+export function exportFullDatabase(): AppDatabaseBackup {
+  initializeStorage();
+  return {
+    version: '1.0',
+    exportedAt: new Date().toISOString(),
+    courses: getCourses(),
+    posts: getPosts(),
+    testimonials: getTestimonials(),
+    orders: getOrders(),
+    users: getUsers(),
+  };
+}
+
+export function importFullDatabase(data: Partial<AppDatabaseBackup>): boolean {
+  try {
+    if (data.courses && Array.isArray(data.courses) && data.courses.length > 0) {
+      saveCourses(data.courses);
+    }
+    if (data.posts && Array.isArray(data.posts)) {
+      savePosts(data.posts);
+    }
+    if (data.testimonials && Array.isArray(data.testimonials)) {
+      saveTestimonials(data.testimonials);
+    }
+    if (data.orders && Array.isArray(data.orders)) {
+      saveOrders(data.orders);
+    }
+    if (data.users && Array.isArray(data.users)) {
+      saveUsers(data.users);
+    }
+    return true;
+  } catch (err) {
+    console.error('Failed to import database:', err);
+    return false;
+  }
+}
+
