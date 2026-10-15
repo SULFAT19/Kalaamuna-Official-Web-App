@@ -43,8 +43,31 @@ export default function App() {
       pullFromGoogleSheets()
         .then((pulled) => {
           if (pulled.courses && pulled.courses.length > 0) {
-            saveCourses(pulled.courses);
-            setCourses(pulled.courses);
+            const currentCourses = getCourses();
+            const courseMap = new Map<string, Course>();
+            currentCourses.forEach((c) => courseMap.set(c.id, c));
+
+            pulled.courses.forEach((p) => {
+              const existing = Array.from(courseMap.values()).find(
+                (ex) => ex.id === p.id || ex.title.toLowerCase() === p.title.toLowerCase()
+              );
+              if (existing) {
+                courseMap.set(existing.id, {
+                  ...existing,
+                  ...p,
+                  thumbnail: p.thumbnail || existing.thumbnail,
+                  lessons: (p.lessons && p.lessons.length > 0) ? p.lessons : existing.lessons,
+                  whatYouWillGet: (p.whatYouWillGet && p.whatYouWillGet.length > 0) ? p.whatYouWillGet : existing.whatYouWillGet,
+                  features: (p.features && p.features.length > 0) ? p.features : existing.features,
+                });
+              } else {
+                courseMap.set(p.id, p);
+              }
+            });
+
+            const merged = Array.from(courseMap.values());
+            saveCourses(merged);
+            setCourses(merged);
           }
           if (pulled.testimonials && pulled.testimonials.length > 0) {
             saveTestimonials(pulled.testimonials);

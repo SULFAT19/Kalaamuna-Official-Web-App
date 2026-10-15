@@ -113,6 +113,14 @@ async function sendToAppsScript(payload: any): Promise<boolean> {
     saveSheetConfig({ lastSyncTime: new Date().toISOString() });
     return true;
   } catch (err) {
+    try {
+      const getUrl = `${scriptUrl}${scriptUrl.includes('?') ? '&' : '?'}action=${encodeURIComponent(payload.action)}&data=${encodeURIComponent(JSON.stringify(payload))}`;
+      if (getUrl.length < 2000) {
+        await fetch(getUrl, { mode: 'no-cors' });
+        saveSheetConfig({ lastSyncTime: new Date().toISOString() });
+        return true;
+      }
+    } catch (e2) {}
     console.warn('Gagal mengirim data ke Google Spreadsheet Web App:', err);
     return false;
   }
@@ -214,48 +222,80 @@ export async function pushAllToGoogleSheets(state: {
         role: u.role,
         phone: u.phone || '-',
         createdAt: u.createdAt,
+        lastActive: new Date().toISOString(),
       })),
       courses: state.courses.map((c) => ({
+        idkursus: c.id,
+        judulkursus: c.title,
+        judularab: c.arabicTitle || '-',
+        kategori: c.category || 'Kaidah Bahasa',
+        tingkat: c.level || 'Pemula',
+        harga: c.price || 0,
+        hargaasli: c.originalPrice || c.price || 0,
+        pengajar: c.instructorName || 'Mudarris Kalaamunaa',
+        jumlahpelajaran: c.lessons ? c.lessons.length : 0,
+        linkformsertifikat: c.certificateFormUrl || '-',
+        deskripsi: c.description || '-',
         id: c.id,
         title: c.title,
-        arabicTitle: c.arabicTitle,
+        arabicTitle: c.arabicTitle || '-',
         category: c.category,
         level: c.level,
         price: c.price,
         originalPrice: c.originalPrice,
         instructor: c.instructorName || 'Mudarris Kalaamunaa',
-        lessonsCount: c.lessons.length,
+        lessonsCount: c.lessons ? c.lessons.length : 0,
         certificateFormUrl: c.certificateFormUrl || '-',
         description: c.description,
       })),
       lessons: state.courses.flatMap((c) =>
-        c.lessons.map((l, idx) => ({
-          courseId: c.id,
+        (c.lessons || []).map((l, idx) => ({
+          idpelajaran: l.id,
+          idkursus: c.id,
+          urutan: idx + 1,
+          judulpelajaran: l.title,
+          judularab: l.arabicTitle || '-',
+          durasi: l.duration || '15 Menit',
+          linkyoutube: l.youtubeUrl || '',
+          linkgoogleformkuis: l.quizUrl || '',
           lessonId: l.id,
+          courseId: c.id,
           order: idx + 1,
           title: l.title,
           arabicTitle: l.arabicTitle || '-',
           duration: l.duration || '15 Menit',
-          youtubeUrl: l.youtubeUrl,
-          quizUrl: l.quizUrl,
+          youtubeUrl: l.youtubeUrl || '',
+          quizUrl: l.quizUrl || '',
         }))
       ),
       orders: state.orders.map((o) => ({
+        idpesanan: o.id,
+        namasiswa: o.studentName,
+        emailsiswa: o.studentEmail,
+        nowhatsapp: o.studentPhone || '-',
+        daftarkursus: o.items.map((i) => `${i.title} (${i.price})`).join('; '),
+        totalharga: o.totalPrice,
+        status: o.status.toUpperCase(),
+        tanggalpesan: o.createdAt,
+        tanggalapproval: o.approvedAt || '-',
         id: o.id,
         studentName: o.studentName,
         studentEmail: o.studentEmail,
         studentPhone: o.studentPhone || '-',
         courses: o.items.map((i) => `${i.title} (${i.price})`).join('; '),
         totalPrice: o.totalPrice,
-        status: o.status.toUpperCase(),
         createdAt: o.createdAt,
         approvedAt: o.approvedAt || '-',
       })),
       testimonials: state.testimonials.map((t) => ({
         id: t.id,
+        namasiswa: t.name,
+        namakursus: t.courseName,
+        rating: t.rating,
+        komentar: t.comment,
+        tanggal: t.createdAt,
         name: t.name,
         courseName: t.courseName,
-        rating: t.rating,
         comment: t.comment,
         createdAt: t.createdAt,
       })),
@@ -320,110 +360,169 @@ export async function pullFromGoogleSheets(): Promise<{
 
   // 1. Users
   const parsedUsers: User[] = (rawData.users || []).map((u: any) => ({
-    id: u.id || 'user-' + Date.now(),
-    name: u.name || 'Peserta',
-    email: u.email || '',
-    role: u.role || 'student',
-    phone: u.phone !== '-' ? u.phone : '',
-    createdAt: u.createdAt || new Date().toISOString(),
+    id: (u.id || u.ID || 'user-' + Date.now()).toString(),
+    name: (u.name || u.namalengkap || u['Nama Lengkap'] || 'Peserta').toString(),
+    email: (u.email || u.Email || '').toString().toLowerCase().trim(),
+    role: (u.role || u.Role || 'student') as any,
+    phone: (u.phone || u.nowhatsapp || u['No WhatsApp'] || '').toString() !== '-' ? (u.phone || u.nowhatsapp || u['No WhatsApp'] || '').toString() : '',
+    createdAt: (u.createdAt || u.tanggaldaftar || u['Tanggal Daftar'] || new Date().toISOString()).toString(),
   })).filter((u: User) => u.email);
 
-  // 2. Lessons group
+  // 2. Lessons group with smart column-swap resilience
   const lessonsByCourse: Record<string, Lesson[]> = {};
   (rawData.lessons || []).forEach((l: any) => {
-    const courseId = l.courseId || '';
+    const rawPelajaran = (l.idpelajaran || l['ID Pelajaran'] || l.lessonId || '').toString();
+    const rawKursus = (l.idkursus || l['ID Kursus'] || l.courseId || '').toString();
+
+    let courseId = '';
+    let lessonId = '';
+
+    if (rawKursus.startsWith('course-')) {
+      courseId = rawKursus;
+      lessonId = rawPelajaran || ('lesson-' + Math.random().toString(36).slice(2, 8));
+    } else if (rawPelajaran.startsWith('course-')) {
+      courseId = rawPelajaran;
+      lessonId = rawKursus || ('lesson-' + Math.random().toString(36).slice(2, 8));
+    } else {
+      courseId = rawKursus || rawPelajaran || '';
+      lessonId = rawPelajaran || rawKursus || ('lesson-' + Math.random().toString(36).slice(2, 8));
+    }
+
+    if (!courseId) return;
     if (!lessonsByCourse[courseId]) lessonsByCourse[courseId] = [];
+
+    const orderNum = Number(l.urutan || l['Urutan'] || l.order) || (lessonsByCourse[courseId].length + 1);
+    const title = (l.judulpelajaran || l['Judul Pelajaran'] || l.title || 'Materi Pelajaran').toString();
+    const rawArabic = (l.judularab || l['Judul Arab'] || l.arabicTitle || '').toString();
+    const arabicTitle = rawArabic !== '-' ? rawArabic : '';
+    const duration = (l.durasi || l['Durasi'] || l.duration || '15 Menit').toString();
+    const youtubeUrl = (l.linkyoutube || l['Link YouTube'] || l.youtubeUrl || '').toString();
+    const quizUrl = (l.linkgoogleformkuis || l['Link Google Form Kuis'] || l.quizUrl || '').toString();
+
     lessonsByCourse[courseId].push({
-      id: l.lessonId || l.id || 'lesson-' + Math.random(),
-      order: Number(l.order) || lessonsByCourse[courseId].length + 1,
-      title: l.title || 'Materi Pelajaran',
-      arabicTitle: l.arabicTitle !== '-' ? l.arabicTitle : '',
-      duration: l.duration || '15 Menit',
-      youtubeUrl: l.youtubeUrl || '',
-      quizUrl: l.quizUrl || '',
+      id: lessonId,
+      order: orderNum,
+      title,
+      arabicTitle,
+      duration,
+      youtubeUrl,
+      quizUrl,
     });
   });
 
+  // Sort lessons in each course by order
+  Object.keys(lessonsByCourse).forEach(cId => {
+    lessonsByCourse[cId].sort((a, b) => a.order - b.order);
+  });
+
   // 3. Courses
+  const rawLocal = localStorage.getItem('kalaamunaa_courses');
+  const localExisting: Course[] = rawLocal ? JSON.parse(rawLocal) : [];
+
   const parsedCourses: Course[] = (rawData.courses || []).map((c: any) => {
-    const id = c.id || 'course-' + Date.now();
-    const title = c.title || 'Kursus Bahasa Arab';
-    const lessons = lessonsByCourse[id] || [
-      {
-        id: 'lesson-' + id + '-1',
-        title: 'Pelajaran 1: Pengantar Materi',
-        arabicTitle: 'الدرس الأول',
-        duration: '15 Menit',
-        youtubeUrl: 'https://www.youtube.com/watch?v=kYJv_i7tq-k',
-        quizUrl: 'https://forms.google.com',
-        order: 1,
-      },
-    ];
+    const id = (c.id || c.idkursus || c['ID Kursus'] || '').toString() || ('course-' + Date.now());
+    const title = (c.title || c.judulkursus || c['Judul Kursus'] || '').toString();
+    if (!title) return null as any;
+
+    const localMatch = localExisting.find(ex => ex.id === id || ex.title.toLowerCase() === title.toLowerCase());
+
+    const lessons = (lessonsByCourse[id] && lessonsByCourse[id].length > 0)
+      ? lessonsByCourse[id]
+      : (localMatch?.lessons || [
+          {
+            id: 'lesson-' + id + '-1',
+            title: 'Pelajaran 1: Pengantar Materi',
+            arabicTitle: 'الدرس الأول',
+            duration: '15 Menit',
+            youtubeUrl: 'https://www.youtube.com/watch?v=kYJv_i7tq-k',
+            quizUrl: 'https://forms.google.com',
+            order: 1,
+          },
+        ]);
+
+    const arabicTitle = (c.arabicTitle || c.judularab || c['Judul Arab'] || localMatch?.arabicTitle || '').toString();
+    const category = (c.category || c.kategori || c['Kategori'] || localMatch?.category || 'Kaidah Bahasa').toString();
+    const level = (c.level || c.tingkat || c['Tingkat'] || localMatch?.level || 'Pemula') as any;
+    const price = Number(c.price || c.harga || c['Harga'] || localMatch?.price || 0);
+    const originalPrice = Number(c.originalPrice || c.hargaasli || c['Harga Asli'] || localMatch?.originalPrice || price);
+    const instructorName = (c.instructor || c.pengajar || c['Pengajar'] || localMatch?.instructorName || 'Mudarris Kalaamunaa').toString();
+    const certificateFormUrl = (c.certificateFormUrl || c.linkformsertifikat || c['Link Form Sertifikat'] || localMatch?.certificateFormUrl || 'https://forms.google.com').toString();
+    const description = (c.description || c.deskripsi || c['Deskripsi'] || localMatch?.description || '').toString();
+    const thumbnail = (c.thumbnail || c.foto || c['Thumbnail'] || localMatch?.thumbnail || 'https://images.unsplash.com/photo-1584286595398-a59f21d313f5?auto=format&fit=crop&w=800&q=80').toString();
 
     return {
       id,
-      slug: title.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+      slug: localMatch?.slug || title.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
       title,
-      arabicTitle: c.arabicTitle || '',
-      category: c.category || 'Kaidah Bahasa',
-      level: c.level || 'Pemula',
-      price: Number(c.price) || 0,
-      originalPrice: Number(c.originalPrice) || Number(c.price) || 0,
-      thumbnail: 'https://images.unsplash.com/photo-1584286595398-a59f21d313f5?auto=format&fit=crop&w=800&q=80',
-      description: c.description || '',
-      whatYouWillGet: [
+      arabicTitle: arabicTitle !== '-' ? arabicTitle : '',
+      category,
+      level,
+      price,
+      originalPrice,
+      thumbnail,
+      description: description !== '-' ? description : '',
+      whatYouWillGet: localMatch?.whatYouWillGet || [
         'Memahami materi bahasa Arab terstruktur',
         'Latihan dan kuis pemahaman tiap modul',
         'Sertifikat kelulusan resmi',
       ],
-      features: ['Video Interaktif', 'Kuis Per Modul', 'E-Sertifikat Resmi'],
-      certificateFormUrl: c.certificateFormUrl !== '-' ? c.certificateFormUrl : 'https://forms.google.com',
-      instructorName: c.instructor || 'Mudarris Kalaamunaa',
+      features: localMatch?.features || ['Video Interaktif', 'Kuis Per Modul', 'E-Sertifikat Resmi'],
+      certificateFormUrl: certificateFormUrl !== '-' ? certificateFormUrl : 'https://forms.google.com',
+      instructorName,
       status: 'published' as const,
       lessons,
     };
-  }).filter((c: Course) => c.title);
+  }).filter((c: Course | null): c is Course => c !== null);
 
   // 4. Orders
   const parsedOrders: Order[] = (rawData.orders || []).map((o: any) => {
-    const rawCourses = o.courses || o.items || '';
+    const rawCourses = o.courses || o.daftarkursus || o['Daftar Kursus'] || o.items || '';
     const items = typeof rawCourses === 'string'
       ? rawCourses.split('; ').map((itemStr: string) => {
           const parts = itemStr.split(' (');
           return {
             courseId: 'course-' + Math.random(),
             title: parts[0] || 'Kursus',
-            price: parseInt(parts[1]?.replace(')', '') || '0') || Number(o.totalPrice) || 0,
+            price: parseInt(parts[1]?.replace(')', '') || '0') || Number(o.totalPrice || o.totalharga || o['Total Harga']) || 0,
           };
         })
       : rawCourses;
 
-    const studentUser = parsedUsers.find((u) => u.email.toLowerCase() === (o.studentEmail || '').toLowerCase());
+    const studentEmail = (o.studentEmail || o.emailsiswa || o['Email Siswa'] || '').toString();
+    const studentUser = parsedUsers.find((u) => u.email.toLowerCase() === studentEmail.toLowerCase());
+
+    const orderId = (o.id || o.idpesanan || o['ID Pesanan'] || 'ORD-' + Math.floor(100000 + Math.random() * 900000)).toString();
+    const rawStatus = (o.status || o.Status || 'PENDING').toString().toLowerCase();
 
     return {
-      id: o.id || 'ORD-' + Math.floor(100000 + Math.random() * 900000),
-      studentId: studentUser ? studentUser.id : 'user-' + o.studentEmail,
-      studentName: o.studentName || 'Siswa',
-      studentEmail: o.studentEmail || '',
-      studentPhone: o.studentPhone !== '-' ? o.studentPhone : '',
+      id: orderId,
+      studentId: studentUser ? studentUser.id : ('user-' + studentEmail),
+      studentName: (o.studentName || o.namasiswa || o['Nama Siswa'] || 'Siswa').toString(),
+      studentEmail,
+      studentPhone: (o.studentPhone || o.nowhatsapp || o['No WhatsApp'] || '').toString() !== '-' ? (o.studentPhone || o.nowhatsapp || o['No WhatsApp'] || '').toString() : '',
       items,
-      totalPrice: Number(o.totalPrice) || 0,
-      status: (o.status || 'PENDING').toLowerCase() as any,
-      createdAt: o.createdAt || new Date().toISOString(),
-      approvedAt: o.approvedAt !== '-' ? o.approvedAt : undefined,
+      totalPrice: Number(o.totalPrice || o.totalharga || o['Total Harga']) || 0,
+      status: (rawStatus === 'approved' ? 'approved' : rawStatus === 'rejected' ? 'rejected' : 'pending') as any,
+      createdAt: (o.createdAt || o.tanggalpesan || o['Tanggal Pesan'] || new Date().toISOString()).toString(),
+      approvedAt: (o.approvedAt || o.tanggalapproval || o['Tanggal Approval']) !== '-' ? (o.approvedAt || o.tanggalapproval || o['Tanggal Approval']) : undefined,
     };
   }).filter((o: Order) => o.studentEmail);
 
   // 5. Testimonials
-  const parsedTestimonials: Testimonial[] = (rawData.testimonials || []).map((t: any) => ({
-    id: t.id || 'testi-' + Math.random(),
-    name: t.name || 'Peserta',
-    courseName: t.courseName || 'Nahwu Kilat Dasar',
-    rating: Number(t.rating) || 5,
-    comment: t.comment || '',
-    avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&q=80',
-    createdAt: t.createdAt || new Date().toISOString().split('T')[0],
-  })).filter((t: Testimonial) => t.comment);
+  const parsedTestimonials: Testimonial[] = (rawData.testimonials || []).map((t: any) => {
+    const comment = (t.comment || t.komentar || t['Komentar'] || '').toString();
+    if (!comment) return null as any;
+
+    return {
+      id: (t.id || t.ID || 'testi-' + Math.random()).toString(),
+      name: (t.name || t.namasiswa || t['Nama Siswa'] || 'Peserta').toString(),
+      courseName: (t.courseName || t.namakursus || t['Nama Kursus'] || 'Nahwu Kilat Dasar').toString(),
+      rating: Number(t.rating || t.Rating) || 5,
+      comment,
+      avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=150&q=80',
+      createdAt: (t.createdAt || t.tanggal || t['Tanggal'] || new Date().toISOString().split('T')[0]).toString(),
+    };
+  }).filter((t: Testimonial | null): t is Testimonial => t !== null);
 
   saveSheetConfig({ lastSyncTime: new Date().toISOString() });
 
@@ -437,24 +536,66 @@ export async function pullFromGoogleSheets(): Promise<{
 
 // Ready-to-paste Google Apps Script code for the user
 export const APPS_SCRIPT_TEMPLATE = `/**
- * Google Apps Script untuk Kalaamunaa Arabic Learning
- * 100% Bebas Firebase - Langsung tersimpan ke Google Spreadsheet
+ * =========================================================================
+ * GOOGLE APPS SCRIPT DATABASE - KALAAMUNAA ARABIC LEARNING
+ * 100% Bebas Firebase - Langsung tersimpan permanen ke Google Spreadsheet
+ * =========================================================================
  * 
- * Cara Pasang:
+ * PANDUAN PENYETELAN PENTING (PASTIKAN LANGKAH 4 & 5 BENAR):
  * 1. Buka Google Spreadsheet Anda
  * 2. Klik menu 'Ekstensi' (Extensions) -> 'Apps Script'
- * 3. Hapus semua kode yang ada, lalu tempel (paste) seluruh kode ini
+ * 3. Hapus seluruh kode lama di editor, lalu tempel (paste) seluruh kode ini
  * 4. Klik tombol 'Terapkan' (Deploy) -> 'Deployment baru' (New deployment)
- * 5. Pilih jenis: 'Aplikasi Web' (Web app)
- * 6. Pada 'Yang memiliki akses' (Who has access), pilih: 'Siapa saja' (Anyone)
- * 7. Klik 'Terapkan' (Deploy), lalu salin URL Aplikasi Web (contoh: https://script.google.com/macros/s/.../exec)
- * 8. Tempelkan URL tersebut ke web app Kalaamunaa pada menu Sinkronisasi Spreadsheet!
+ *    (Jika sebelumnya sudah pernah deploy: pilih 'Kelola deployment' -> Edit -> Versi Baru)
+ * 5. PENGATURAN WAJIB:
+ *    - Jenis: 'Aplikasi Web' (Web app)
+ *    - Jalankan sebagai (Execute as): 'Saya' / akun Google Anda sendiri (Me)
+ *    - Yang memiliki akses (Who has access): 'Siapa saja' (Anyone)  <-- SANGAT PENTING!
+ * 6. Klik 'Terapkan' (Deploy) & Izinkan Akses (Allow Access) jika diminta
+ * 7. Salin URL Aplikasi Web berakhiran /exec ke web app Kalaamunaa!
  */
 
 function doGet(e) {
-  var sheet = SpreadsheetApp.getActiveSpreadsheet();
-  var action = (e && e.parameter && e.parameter.action) ? e.parameter.action : "GET_ALL";
-  
+  try {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet();
+    initTabsIfMissing(sheet);
+    var action = (e && e.parameter && e.parameter.action) ? e.parameter.action : "GET_ALL";
+    var payload = {};
+    if (e && e.parameter) {
+      if (e.parameter.data) {
+        try { payload = JSON.parse(decodeURIComponent(e.parameter.data)); } catch (pErr) {}
+      }
+      for (var k in e.parameter) {
+        if (payload[k] === undefined) payload[k] = e.parameter[k];
+      }
+    }
+    return executeAction(sheet, action, payload);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ success: false, error: err.toString() }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+function doPost(e) {
+  try {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet();
+    initTabsIfMissing(sheet);
+    var contents = (e && e.postData && e.postData.contents) ? e.postData.contents : "{}";
+    var payload = JSON.parse(contents);
+    var action = payload.action;
+    return executeAction(sheet, action, payload);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ success: false, error: err.toString() }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+function executeAction(sheet, action, payload) {
+  if (action === "PING") {
+    return ContentService.createTextOutput(JSON.stringify({ success: true, message: "Kalaamunaa API Ready" }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
   if (action === "GET_ALL") {
     var result = {
       users: getSheetData(sheet, "Users"),
@@ -466,67 +607,80 @@ function doGet(e) {
     return ContentService.createTextOutput(JSON.stringify({ success: true, data: result }))
       .setMimeType(ContentService.MimeType.JSON);
   }
-  
-  return ContentService.createTextOutput(JSON.stringify({ success: true, message: "Kalaamunaa API Ready" }))
-    .setMimeType(ContentService.MimeType.JSON);
-}
 
-function doPost(e) {
-  try {
-    var sheet = SpreadsheetApp.getActiveSpreadsheet();
-    var payload = JSON.parse(e.postData.contents);
-    var action = payload.action;
-
-    // Inisialisasi tab jika belum ada
-    initTabsIfMissing(sheet);
-
-    if (action === "USER_EVENT") {
-      var u = payload.user;
-      var usersSheet = sheet.getSheetByName("Users");
-      usersSheet.appendRow([u.id, u.name, u.email, u.role, u.phone, u.createdAt, u.lastActive + " (" + payload.eventType + ")"]);
-    } 
-    else if (action === "ORDER_EVENT") {
-      var o = payload.order;
-      var ordersSheet = sheet.getSheetByName("Orders");
-      ordersSheet.appendRow([o.id, o.studentName, o.studentEmail, o.studentPhone, o.courses, o.totalPrice, o.status, o.createdAt, o.approvedAt]);
+  if (action === "USER_EVENT") {
+    var u = payload.user;
+    if (u) {
+      var usersSheet = sheet.getSheetByName("Users") || sheet.insertSheet("Users");
+      usersSheet.appendRow([u.id, u.name, u.email, u.role, u.phone || "-", u.createdAt, (u.lastActive || "") + " (" + (payload.eventType || "EVENT") + ")"]);
     }
-    else if (action === "UPDATE_ORDER_STATUS") {
-      var ordersSheet = sheet.getSheetByName("Orders");
+    return ContentService.createTextOutput(JSON.stringify({ success: true })).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  if (action === "ORDER_EVENT") {
+    var o = payload.order;
+    if (o) {
+      var ordersSheet = sheet.getSheetByName("Orders") || sheet.insertSheet("Orders");
+      ordersSheet.appendRow([o.id, o.studentName, o.studentEmail, o.studentPhone || "-", o.courses, o.totalPrice, o.status, o.createdAt, o.approvedAt || "-"]);
+    }
+    return ContentService.createTextOutput(JSON.stringify({ success: true })).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  if (action === "UPDATE_ORDER_STATUS") {
+    var ordersSheet = sheet.getSheetByName("Orders");
+    if (ordersSheet) {
       var data = ordersSheet.getDataRange().getValues();
       for (var i = 1; i < data.length; i++) {
         if (data[i][0] == payload.orderId) {
           ordersSheet.getRange(i + 1, 7).setValue(payload.status);
-          ordersSheet.getRange(i + 1, 9).setValue(payload.approvedAt);
+          ordersSheet.getRange(i + 1, 9).setValue(payload.approvedAt || new Date().toISOString());
           break;
         }
       }
     }
-    else if (action === "COURSE_EVENT") {
-      var c = payload.course;
-      var coursesSheet = sheet.getSheetByName("Courses");
-      coursesSheet.appendRow([c.id, c.title, c.arabicTitle, c.category, c.level, c.price, c.originalPrice, c.instructor, c.lessonsCount, c.certificateFormUrl, c.description]);
-      
+    return ContentService.createTextOutput(JSON.stringify({ success: true })).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  if (action === "COURSE_EVENT") {
+    var c = payload.course;
+    if (c) {
+      var coursesSheet = sheet.getSheetByName("Courses") || sheet.insertSheet("Courses");
+      coursesSheet.appendRow([
+        c.id, 
+        c.title, 
+        c.arabicTitle || "-", 
+        c.category || "Kaidah Bahasa", 
+        c.level || "Pemula", 
+        c.price || 0, 
+        c.originalPrice || 0, 
+        c.instructor || "Mudarris Kalaamunaa", 
+        c.lessonsCount || 0, 
+        c.certificateFormUrl || "-", 
+        c.description || "-"
+      ]);
       if (c.lessons && c.lessons.length > 0) {
-        var lessonsSheet = sheet.getSheetByName("Lessons");
+        var lessonsSheet = sheet.getSheetByName("Lessons") || sheet.insertSheet("Lessons");
         for (var j = 0; j < c.lessons.length; j++) {
           var l = c.lessons[j];
-          lessonsSheet.appendRow([l.id, c.id, l.order, l.title, l.arabicTitle, l.duration, l.youtubeUrl, l.quizUrl]);
+          lessonsSheet.appendRow([l.id, c.id, l.order, l.title, l.arabicTitle || "-", l.duration || "15 Menit", l.youtubeUrl || "", l.quizUrl || ""]);
         }
       }
     }
-    else if (action === "PUSH_ALL") {
-      var d = payload.data;
-      if (d.users) overwriteSheet(sheet, "Users", ["ID", "Nama Lengkap", "Email", "Role", "No WhatsApp", "Tanggal Daftar", "Terakhir Aktif"], d.users);
-      if (d.courses) overwriteSheet(sheet, "Courses", ["ID Kursus", "Judul Kursus", "Judul Arab", "Kategori", "Tingkat", "Harga", "Harga Asli", "Pengajar", "Jumlah Pelajaran", "Link Form Sertifikat", "Deskripsi"], d.courses);
-      if (d.lessons) overwriteSheet(sheet, "Lessons", ["ID Pelajaran", "ID Kursus", "Urutan", "Judul Pelajaran", "Judul Arab", "Durasi", "Link YouTube", "Link Google Form Kuis"], d.lessons);
-      if (d.orders) overwriteSheet(sheet, "Orders", ["ID Pesanan", "Nama Siswa", "Email Siswa", "No WhatsApp", "Daftar Kursus", "Total Harga", "Status", "Tanggal Pesan", "Tanggal Approval"], d.orders);
-      if (d.testimonials) overwriteSheet(sheet, "Testimonials", ["ID", "Nama Siswa", "Nama Kursus", "Rating", "Komentar", "Tanggal"], d.testimonials);
-    }
-
     return ContentService.createTextOutput(JSON.stringify({ success: true })).setMimeType(ContentService.MimeType.JSON);
-  } catch (err) {
-    return ContentService.createTextOutput(JSON.stringify({ success: false, error: err.toString() })).setMimeType(ContentService.MimeType.JSON);
   }
+
+  if (action === "PUSH_ALL") {
+    var d = payload.data || payload;
+    if (d.users) overwriteSheet(sheet, "Users", ["ID", "Nama Lengkap", "Email", "Role", "No WhatsApp", "Tanggal Daftar", "Terakhir Aktif"], d.users);
+    if (d.courses) overwriteSheet(sheet, "Courses", ["ID Kursus", "Judul Kursus", "Judul Arab", "Kategori", "Tingkat", "Harga", "Harga Asli", "Pengajar", "Jumlah Pelajaran", "Link Form Sertifikat", "Deskripsi"], d.courses);
+    if (d.lessons) overwriteSheet(sheet, "Lessons", ["ID Pelajaran", "ID Kursus", "Urutan", "Judul Pelajaran", "Judul Arab", "Durasi", "Link YouTube", "Link Google Form Kuis"], d.lessons);
+    if (d.orders) overwriteSheet(sheet, "Orders", ["ID Pesanan", "Nama Siswa", "Email Siswa", "No WhatsApp", "Daftar Kursus", "Total Harga", "Status", "Tanggal Pesan", "Tanggal Approval"], d.orders);
+    if (d.testimonials) overwriteSheet(sheet, "Testimonials", ["ID", "Nama Siswa", "Nama Kursus", "Rating", "Komentar", "Tanggal"], d.testimonials);
+    return ContentService.createTextOutput(JSON.stringify({ success: true })).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  return ContentService.createTextOutput(JSON.stringify({ success: true, message: "Kalaamunaa API Ready" }))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
 function initTabsIfMissing(sheet) {
@@ -566,9 +720,53 @@ function overwriteSheet(spreadsheet, sheetName, headers, objects) {
   var s = spreadsheet.getSheetByName(sheetName) || spreadsheet.insertSheet(sheetName);
   s.clear();
   s.appendRow(headers);
+  if (!objects || objects.length === 0) return;
   for (var i = 0; i < objects.length; i++) {
-    var vals = Object.values(objects[i]);
-    s.appendRow(vals);
+    var obj = objects[i];
+    var row = [];
+    for (var h = 0; h < headers.length; h++) {
+      var headerName = headers[h];
+      var cleanKey = headerName.toString().toLowerCase().replace(/[^a-zA-Z0-9]/g, '');
+      var val = '';
+      if (obj[headerName] !== undefined) {
+        val = obj[headerName];
+      } else if (obj[cleanKey] !== undefined) {
+        val = obj[cleanKey];
+      } else {
+        // Fallbacks
+        if (cleanKey === 'idkursus') val = obj.id || obj.courseId || '';
+        else if (cleanKey === 'judulkursus') val = obj.title || '';
+        else if (cleanKey === 'judularab') val = obj.arabicTitle || '';
+        else if (cleanKey === 'kategori') val = obj.category || '';
+        else if (cleanKey === 'tingkat') val = obj.level || '';
+        else if (cleanKey === 'harga') val = obj.price || 0;
+        else if (cleanKey === 'hargaasli') val = obj.originalPrice || 0;
+        else if (cleanKey === 'pengajar') val = obj.instructor || obj.instructorName || '';
+        else if (cleanKey === 'jumlahpelajaran') val = obj.lessonsCount || (obj.lessons ? obj.lessons.length : 0);
+        else if (cleanKey === 'linkformsertifikat') val = obj.certificateFormUrl || '';
+        else if (cleanKey === 'deskripsi') val = obj.description || '';
+        else if (cleanKey === 'idpelajaran') val = obj.id || obj.lessonId || '';
+        else if (cleanKey === 'urutan') val = obj.order || '';
+        else if (cleanKey === 'judulpelajaran') val = obj.title || '';
+        else if (cleanKey === 'durasi') val = obj.duration || '';
+        else if (cleanKey === 'linkyoutube') val = obj.youtubeUrl || '';
+        else if (cleanKey === 'linkgoogleformkuis') val = obj.quizUrl || '';
+        else if (cleanKey === 'idpesanan') val = obj.id || '';
+        else if (cleanKey === 'namasiswa') val = obj.studentName || obj.name || '';
+        else if (cleanKey === 'emailsiswa') val = obj.studentEmail || obj.email || '';
+        else if (cleanKey === 'nowhatsapp') val = obj.studentPhone || obj.phone || '';
+        else if (cleanKey === 'daftarkursus') val = obj.courses || '';
+        else if (cleanKey === 'totalharga') val = obj.totalPrice || 0;
+        else if (cleanKey === 'tanggalpesan') val = obj.createdAt || '';
+        else if (cleanKey === 'tanggalapproval') val = obj.approvedAt || '';
+        else if (cleanKey === 'namakursus') val = obj.courseName || '';
+        else if (cleanKey === 'komentar') val = obj.comment || '';
+        else if (cleanKey === 'tanggal') val = obj.createdAt || '';
+      }
+      if (val === undefined || val === null) val = '';
+      row.push(val);
+    }
+    s.appendRow(row);
   }
 }
 `;
